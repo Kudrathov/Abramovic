@@ -175,7 +175,7 @@ async def handle_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
                 # Строка строго по требованию: ✅ #1195 ➔ ♠ Игрок Зашел на #1196 1️⃣
                 step_emoji = STEP_EMOJIS.get(offset, "")
-                win_text = f"✅ #{target_raw} ➔ {pred['title']} Зашел на #{raw_id}{step_emoji}"
+                win_text = f"✅ #{target_raw} ➔ {pred['title']}{step_emoji}"
 
                 try:
                     await context.bot.edit_message_text(
@@ -189,7 +189,7 @@ async def handle_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 users_to_remove.append(uid)
 
                 # Если был незаход
-                loss_text = f"❌ #{target_raw} ➔ {pred['title']} Незаход"
+                loss_text = f"❌ #{target_raw} ➔ {pred['title']} "
 
                 try:
                     await context.bot.edit_message_text(
