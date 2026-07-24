@@ -24,12 +24,10 @@ SOURCE_CHAT_ID = -1003469691743
 CHECK_RANGE = 3  # Основная игра + 2 догона (всего 3 игры)
 MAX_GAMES_PER_DAY = 1440
 
-# Смещение для быстрых игр (по умолчанию +2)
-SUIT_OFFSET = int(os.environ.get("SUIT_OFFSET", 2))
+SUIT_OFFSET = int(os.environ.get("SUIT_OFFSET", 1))
 
-# Контакты владельца
 OWNER_NAME = "Abramovich"
-OWNER_USERNAME = "@Ol1garxxxx, https://t.me/creativebaccarat"  # Укажите ваш контактный Telegram username
+OWNER_USERNAME = "@Ol1garxxxx, https://t.me/creativebaccarat"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -45,19 +43,13 @@ SUIT_MATRIX = {
     ('♦', '♠'): '♠', ('♦', '♣'): '♣', ('♦', '♥'): '♦', ('♦', '♦'): '♥'
 }
 
-# ========================= ХРАНИЛИЩЕ В ПАМЯТИ (БЕЗ SQL) =========================
-# users_data: {user_id: {"selected_mode": "off", "is_active": True}}
+# ========================= ХРАНИЛИЩЕ В ПАМЯТИ =========================
 USERS_DATA: Dict[int, Dict] = {}
-
-# active_predictions: {user_id: {"target_raw": 1195, "mode": "suit_p", "title": "♠ ИГРОК", "target_suit": "♠", "msg_id": 123}}
 ACTIVE_PREDICTIONS: Dict[int, Dict] = {}
-
-# stats_data: {"suit_p": {"success": 0, "fail": 0}, "suit_b": {"success": 0, "fail": 0}}
 STATS_DATA: Dict[str, Dict[str, int]] = {
     "suit_p": {"success": 0, "fail": 0},
     "suit_b": {"success": 0, "fail": 0}
 }
-
 game_history: List[Dict] = []
 
 def get_or_create_user(user_id: int) -> dict:
@@ -76,6 +68,13 @@ def update_stat(mode: str, is_success: bool):
         STATS_DATA[mode]["success"] += 1
     else:
         STATS_DATA[mode]["fail"] += 1
+
+# Эмодзи шагов (Основная игра, 1-й догон, 2-й догон)
+STEP_EMOJIS = {
+    0: "",      # Основная игра без спец. эмодзи
+    1: " 1️⃣",   # 1-й догон
+    2: " 2️⃣"    # 2-й догон
+}
 
 # ========================= ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ =========================
 def get_target_game_id(current_id: int, offset: int = 0) -> int:
@@ -170,23 +169,18 @@ async def handle_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
             elif p_type == "suit_b" and target_suit in game["banker_suits"]:
                 is_success = True
 
-            step_str = "Основная игра" if offset == 0 else f"{offset}-й догон"
-
             if is_success:
                 update_stat(p_type, True)
                 users_to_remove.append(uid)
 
-                win_text = (
-                    f"```text\n"
-                    f"💎 #{target_raw} ➔ {pred['title']}\n"
-                    f"✅ Зашел на #{raw_id} [{step_str} ⚡️]\n"
-                    f"```"
-                )
+                # Строка строго по требованию: ✅ #1195 ➔ ♠ Игрок Зашел на #1196 1️⃣
+                step_emoji = STEP_EMOJIS.get(offset, "")
+                win_text = f"✅ #{target_raw} ➔ {pred['title']} Зашел на #{raw_id}{step_emoji}"
 
                 try:
                     await context.bot.edit_message_text(
                         chat_id=uid, message_id=pred["msg_id"],
-                        text=win_text, parse_mode='Markdown'
+                        text=win_text
                     )
                 except TelegramError: pass
 
@@ -194,17 +188,13 @@ async def handle_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 update_stat(p_type, False)
                 users_to_remove.append(uid)
 
-                loss_text = (
-                    f"```text\n"
-                    f"💥 #{target_raw} ➔ {pred['title']}\n"
-                    f"❌ Незаход [Лимит догонов]\n"
-                    f"```"
-                )
+                # Если был незаход
+                loss_text = f"❌ #{target_raw} ➔ {pred['title']} Незаход"
 
                 try:
                     await context.bot.edit_message_text(
                         chat_id=uid, message_id=pred["msg_id"],
-                        text=loss_text, parse_mode='Markdown'
+                        text=loss_text
                     )
                 except TelegramError: pass
 
@@ -223,7 +213,6 @@ async def handle_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
     p_last_suits = get_last_two_suits(game["player_suits"])
     pred_suit_b = SUIT_MATRIX.get(p_last_suits) if p_last_suits else None
 
-    # Фильтруем всех активных пользователей
     active_users = [
         (uid, udata) for uid, udata in USERS_DATA.items() 
         if udata.get("selected_mode") != "off" and udata.get("is_active", True)
@@ -233,7 +222,6 @@ async def handle_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
         uid, user = user_item
         mode = user["selected_mode"]
 
-        # Если у пользователя уже есть активный сигнал — пропускаем
         if uid in ACTIVE_PREDICTIONS:
             return
 
@@ -243,23 +231,17 @@ async def handle_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if mode == "suit_p" and pred_suit_p:
             signal_matched, target_suit = True, pred_suit_p
-            title = f"{pred_suit_p} ИГРОК"
+            title = f"{pred_suit_p} Игрок"
         elif mode == "suit_b" and pred_suit_b:
             signal_matched, target_suit = True, pred_suit_b
-            title = f"{pred_suit_b} БАНКИР"
+            title = f"{pred_suit_b} Банкир"
 
         if signal_matched:
-            game_range_end = get_target_game_id(target_raw, CHECK_RANGE - 1)
-            
-            signal_text = (
-                f"```text\n"
-                f"⚡️ СИГНАЛ #{target_raw} ➔ {title}\n"
-                f"⏳ Диапазон: #{target_raw} - #{game_range_end}\n"
-                f"```"
-            )
+            # Формат первоначального сигнала в 1 строку
+            signal_text = f"⚡️ #{target_raw} ➔ {title}"
 
             try:
-                sent_msg = await context.bot.send_message(uid, signal_text, parse_mode='Markdown')
+                sent_msg = await context.bot.send_message(uid, signal_text)
 
                 ACTIVE_PREDICTIONS[uid] = {
                     "target_raw": target_raw,
@@ -380,7 +362,7 @@ def main():
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler((filters.Chat(SOURCE_CHAT_ID) & filters.TEXT) | filters.UpdateType.EDITED_CHANNEL_POST, handle_game))
 
-    logger.info("🚀 VIP Predictor Bot запущен (Без БД)!")
+    logger.info("🚀 VIP Predictor Bot запущен!")
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
