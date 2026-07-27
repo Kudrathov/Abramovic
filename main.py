@@ -21,9 +21,11 @@ load_dotenv()
 # ========================= КОНФИГ И НАСТРОЙКИ =========================
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 SOURCE_CHAT_ID = int(os.environ.get("SOURCE_CHAT_ID", -1003469691743))
-CHECK_RANGE = 4
+CHECK_RANGE = 4  # 0 (основная), 1, 2, 3 (до 3-го догона включительно)
 MAX_GAMES_PER_DAY = 1440
 SUIT_OFFSET = int(os.environ.get("SUIT_OFFSET", 1))
+
+# ID канала, куда дублировать прогноз, если предыдущий зашел на 3-м или 4-м шаге (offset 2 или 3)
 DOGON_CHANNEL_ID = int(os.environ.get("DOGON_CHANNEL_ID", 0))
 
 OWNER_NAME = "Abramovich"
@@ -70,10 +72,10 @@ def update_stat(mode: str, is_success: bool):
         STATS_DATA[mode]["fail"] += 1
 
 STEP_EMOJIS = {
-    0: "0️⃣",
-    1: "1️⃣",
-    2: "2️⃣",
-    3: "3️⃣"
+    0: "0️⃣",  # Основная игра
+    1: "1️⃣",  # 1-й догон
+    2: "2️⃣",  # 2-й догон
+    3: "3️⃣"   # 3-й догон
 }
 
 # ========================= ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ =========================
@@ -114,7 +116,6 @@ def parse_game(text: str) -> Optional[Dict]:
     return None
 
 def get_last_two_suits(suits_list: List[str]) -> Optional[tuple]:
-    """Возвращает последние две масти (индексы 1 и 2 при наличии 3 карт, или 0 и 1 при 2 картах)"""
     if len(suits_list) >= 3:
         return (suits_list[1], suits_list[2])
     elif len(suits_list) == 2:
@@ -122,7 +123,6 @@ def get_last_two_suits(suits_list: List[str]) -> Optional[tuple]:
     return None
 
 def get_first_two_suits(suits_list: List[str]) -> Optional[tuple]:
-    """Возвращает первые две масти (индексы 0 и 1)"""
     if len(suits_list) >= 2:
         return (suits_list[0], suits_list[1])
     return None
@@ -154,7 +154,7 @@ async def handle_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if game_history and game_history[-1]["raw_id"] == raw_id:
         return
 
-    # === 1. ПРОВЕРКА АКТИВНЫХ СИГНАЛОВ ===
+    # === 1. ПРОВЕРКА АКТИВНЫХ СИГНАЛОВ И ОБНОВЛЕНИЕ СТАТУСА ===
     users_to_remove = []
 
     for uid, pred in list(ACTIVE_PREDICTIONS.items()):
@@ -175,25 +175,51 @@ async def handle_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 update_stat(p_type, True)
                 users_to_remove.append(uid)
 
-                if offset in (1, 2):
+                # Если зашло на 3-м или 4-м шаге (offset 2 или 3)
+                if offset in (2, 3):
                     USERS_DATA[uid]["last_was_dogon"] = True
 
                 step_emoji = STEP_EMOJIS.get(offset, "")
-                win_text = f"✅ #{target_raw} ➔ {pred['title']}{step_emoji}"
+                result_text = f"✅ #{target_raw} ➔ {pred['title']}{step_emoji}"
 
+                # Редактируем сообщение у пользователя
                 try:
-                    await context.bot.edit_message_text(chat_id=uid, message_id=pred["msg_id"], text=win_text)
+                    await context.bot.edit_message_text(chat_id=uid, message_id=pred["msg_id"], text=result_text)
                 except TelegramError:
                     pass
+
+                # Редактируем сообщение в канале (если оно было отправлено)
+                if pred.get("channel_msg_id") and DOGON_CHANNEL_ID != 0:
+                    try:
+                        await context.bot.edit_message_text(
+                            chat_id=DOGON_CHANNEL_ID, 
+                            message_id=pred["channel_msg_id"], 
+                            text=result_text
+                        )
+                    except TelegramError:
+                        pass
 
             elif offset == CHECK_RANGE - 1:
                 update_stat(p_type, False)
                 users_to_remove.append(uid)
-                loss_text = f"❌ #{target_raw} ➔ {pred['title']} "
+                result_text = f"❌ #{target_raw} ➔ {pred['title']} "
+
+                # Редактируем сообщение у пользователя
                 try:
-                    await context.bot.edit_message_text(chat_id=uid, message_id=pred["msg_id"], text=loss_text)
+                    await context.bot.edit_message_text(chat_id=uid, message_id=pred["msg_id"], text=result_text)
                 except TelegramError:
                     pass
+
+                # Редактируем сообщение в канале (если оно было отправлено)
+                if pred.get("channel_msg_id") and DOGON_CHANNEL_ID != 0:
+                    try:
+                        await context.bot.edit_message_text(
+                            chat_id=DOGON_CHANNEL_ID, 
+                            message_id=pred["channel_msg_id"], 
+                            text=result_text
+                        )
+                    except TelegramError:
+                        pass
 
     for uid in users_to_remove:
         ACTIVE_PREDICTIONS.pop(uid, None)
@@ -204,11 +230,9 @@ async def handle_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
         game_history.pop(0)
 
     # === 3. РАСЧЕТ И ВЫДАЧА НОВОГО СИГНАЛА ===
-    # Масть Игрока прогнозируем по последним двум мастям Банкира
     b_last_suits = get_last_two_suits(game["banker_suits"])
     pred_suit_p = SUIT_MATRIX.get(b_last_suits) if b_last_suits else None
 
-    # Масть Банкира прогнозируем по ПЕРВЫМ двум мастям Игрока (изменено!)
     p_first_suits = get_first_two_suits(game["player_suits"])
     pred_suit_b = SUIT_MATRIX.get(p_first_suits) if p_first_suits else None
 
@@ -236,33 +260,32 @@ async def handle_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
             title = f"{pred_suit_b} Банкир"
 
         if signal_matched:
+            # Формат строго: номер игры и масть
             signal_text = f"⚡️ #{target_raw} ➔ {title}"
             
             is_dogon_follow_up = user.get("last_was_dogon", False)
-            user["last_was_dogon"] = False
+            user["last_was_dogon"] = False  # Сразу сбрасываем флаг
 
             try:
+                # 1. Отправляем пользователю
                 sent_msg = await context.bot.send_message(uid, signal_text)
-
+                
+                channel_msg_id = None
+                # 2. Если предыдущий зашел с догоном, отправляем ТОЧНО ТАКОЙ ЖЕ текст в канал
                 if is_dogon_follow_up and DOGON_CHANNEL_ID != 0:
-                    channel_text = (
-                        f"🔥 **ДОГОН-СИГНАЛ**\n"
-                        f"👤 Пользователь: `{uid}`\n"
-                        f"ℹ️ Предыдущий прогноз зашел с догоном (2 или 3 шаг).\n"
-                        f"🎯 Текущий сигнал: {signal_text}"
-                    )
-                    await context.bot.send_message(
+                    channel_msg = await context.bot.send_message(
                         chat_id=DOGON_CHANNEL_ID, 
-                        text=channel_text, 
-                        parse_mode='Markdown'
+                        text=signal_text
                     )
+                    channel_msg_id = channel_msg.message_id
 
                 ACTIVE_PREDICTIONS[uid] = {
                     "target_raw": target_raw,
                     "mode": mode,
                     "title": title,
                     "target_suit": target_suit,
-                    "msg_id": sent_msg.message_id
+                    "msg_id": sent_msg.message_id,
+                    "channel_msg_id": channel_msg_id  # Сохраняем ID для последующего редактирования
                 }
 
             except TelegramError as e:
