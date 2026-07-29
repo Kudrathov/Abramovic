@@ -59,8 +59,15 @@ def get_or_create_user(user_id: int) -> dict:
         USERS_DATA[user_id] = {
             "selected_mode": "off",
             "is_active": True,
-            "last_was_dogon": False
+            "last_was_dogon": False,
+            "consecutive_zero_wins": 0  # Счетчик последовательных успехов в основной игре
         }
+    else:
+        # Если поле отсутствует у существующего пользователя, добавляем его
+        if "consecutive_zero_wins" not in USERS_DATA[user_id]:
+            USERS_DATA[user_id]["consecutive_zero_wins"] = 0
+        if "last_was_dogon" not in USERS_DATA[user_id]:
+            USERS_DATA[user_id]["last_was_dogon"] = False
     return USERS_DATA[user_id]
 
 def update_stat(mode: str, is_success: bool):
@@ -175,9 +182,17 @@ async def handle_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 update_stat(p_type, True)
                 users_to_remove.append(uid)
 
-                # Если зашло на 3-м или 4-м шаге (offset 2 или 3)
-                if offset in (2, 3):
-                    USERS_DATA[uid]["last_was_dogon"] = True
+                # НОВАЯ ЛОГИКА: отслеживаем успехи в основной игре (offset 0)
+                if offset == 0:
+                    # Увеличиваем счетчик последовательных успехов в основной игре
+                    USERS_DATA[uid]["consecutive_zero_wins"] = USERS_DATA[uid].get("consecutive_zero_wins", 0) + 1
+                    # Если было 2 успеха подряд в 0, активируем флаг для публикации следующего сигнала
+                    if USERS_DATA[uid]["consecutive_zero_wins"] >= 2:
+                        USERS_DATA[uid]["last_was_dogon"] = True
+                        logger.info(f"User {uid}: два успеха подряд в 0 - следующий сигнал уйдет в канал")
+                else:
+                    # Если успех был не в 0, сбрасываем счетчик
+                    USERS_DATA[uid]["consecutive_zero_wins"] = 0
 
                 step_emoji = STEP_EMOJIS.get(offset, "")
                 result_text = f"✅ #{target_raw} ➔ {pred['title']}{step_emoji}"
@@ -199,9 +214,15 @@ async def handle_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     except TelegramError:
                         pass
 
+                # Если зашло на 3-м или 4-м шаге (offset 2 или 3) - оставляем как было
+                if offset in (2, 3):
+                    USERS_DATA[uid]["last_was_dogon"] = True
+
             elif offset == CHECK_RANGE - 1:
                 update_stat(p_type, False)
                 users_to_remove.append(uid)
+                # При неудаче сбрасываем счетчик последовательных успехов
+                USERS_DATA[uid]["consecutive_zero_wins"] = 0
                 result_text = f"❌ #{target_raw} ➔ {pred['title']} "
 
                 # Редактируем сообщение у пользователя
@@ -263,6 +284,7 @@ async def handle_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Формат строго: номер игры и масть
             signal_text = f"⚡️ #{target_raw} ➔ {title}"
             
+            # Проверяем флаг для публикации в канал
             is_dogon_follow_up = user.get("last_was_dogon", False)
             user["last_was_dogon"] = False  # Сразу сбрасываем флаг
 
@@ -271,13 +293,14 @@ async def handle_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 sent_msg = await context.bot.send_message(uid, signal_text)
                 
                 channel_msg_id = None
-                # 2. Если предыдущий зашел с догоном, отправляем ТОЧНО ТАКОЙ ЖЕ текст в канал
+                # 2. Если предыдущий зашел с догоном ИЛИ было 2 успеха подряд в 0, отправляем в канал
                 if is_dogon_follow_up and DOGON_CHANNEL_ID != 0:
                     channel_msg = await context.bot.send_message(
                         chat_id=DOGON_CHANNEL_ID, 
                         text=signal_text
                     )
                     channel_msg_id = channel_msg.message_id
+                    logger.info(f"Сигнал отправлен в канал для пользователя {uid} (причина: два успеха подряд в 0 или догон)")
 
                 ACTIVE_PREDICTIONS[uid] = {
                     "target_raw": target_raw,
@@ -319,12 +342,16 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         if query.data == "stop_mode":
             user["selected_mode"] = "off"
+            user["consecutive_zero_wins"] = 0  # Сбрасываем счетчик при остановке
+            user["last_was_dogon"] = False
             await query.edit_message_text("🛑 **Выдача сигналов остановлена.**\nВыберите нужный режим ниже для повторного запуска.", reply_markup=main_menu("off"), parse_mode='Markdown')
 
         elif query.data in ["select_suit_p", "select_suit_b"]:
             mode_map = {"select_suit_p": ("suit_p", "Масть Игрока"), "select_suit_b": ("suit_b", "Масть Банкира")}
             mode_code, mode_title = mode_map[query.data]
             user["selected_mode"] = mode_code
+            user["consecutive_zero_wins"] = 0  # Сбрасываем счетчик при смене режима
+            user["last_was_dogon"] = False
             text = f"⚡️ **АВТО-РЕЖИМ ЗАПУЩЕН**\n───────────────\n🎯 **Выбран алгоритм:** `{mode_title}`\n📡 Ожидайте сигналы..."
             await query.edit_message_text(text, reply_markup=main_menu(mode_code), parse_mode='Markdown')
 
