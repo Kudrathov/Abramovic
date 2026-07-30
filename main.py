@@ -185,40 +185,74 @@ async def handle_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if 0 <= offset < CHECK_RANGE:
             p_type = pred["mode"]
-            target_suit = pred.get("target_suit")
-            is_success = False
+            target_suit = pred.get("target_suit")  # Основная масть для прогноза
+            mirror_suit = pred.get("mirror_suit")  # Зеркальная масть для прогноза
+            
+            # Проверяем основную масть отдельно
+            main_success = False
+            if p_type == "suit_p":
+                if target_suit in game["player_suits"]:
+                    main_success = True
+            elif p_type == "suit_b":
+                if target_suit in game["banker_suits"]:
+                    main_success = True
+            
+            # Проверяем зеркальную масть отдельно
+            mirror_success = False
+            if p_type == "suit_p":
+                if mirror_suit in game["player_suits"]:
+                    mirror_success = True
+            elif p_type == "suit_b":
+                if mirror_suit in game["banker_suits"]:
+                    mirror_success = True
 
-            if p_type == "suit_p" and target_suit in game["player_suits"]:
-                is_success = True
-            elif p_type == "suit_b" and target_suit in game["banker_suits"]:
-                is_success = True
-
-            if is_success:
-                update_stat(p_type, True)
+            if main_success or mirror_success:
+                # Обновляем статистику для основной масти, если она зашла
+                if main_success:
+                    update_stat(p_type, True)
+                
+                # Если основная масть НЕ зашла, но зеркальная зашла - считаем как неудачу для статистики
+                if not main_success and mirror_success:
+                    update_stat(p_type, False)
+                
                 users_to_remove.append(uid)
 
                 # НОВАЯ ЛОГИКА: отслеживаем успехи в основной игре (offset 0)
-                if offset == 0:
+                if offset == 0 and main_success:
                     # Увеличиваем счетчик последовательных успехов в основной игре
                     USERS_DATA[uid]["consecutive_zero_wins"] = USERS_DATA[uid].get("consecutive_zero_wins", 0) + 1
                     # Если было 2 успеха подряд в 0, активируем флаг для публикации следующего сигнала
                     if USERS_DATA[uid]["consecutive_zero_wins"] >= 2:
                         USERS_DATA[uid]["last_was_dogon"] = True
                         logger.info(f"User {uid}: два успеха подряд в 0 - следующий сигнал уйдет в канал")
+                elif offset == 0 and not main_success and mirror_success:
+                    # Если в основной игре зашла только зеркальная масть - сбрасываем счетчик
+                    USERS_DATA[uid]["consecutive_zero_wins"] = 0
                 else:
                     # Если успех был не в 0, сбрасываем счетчик
                     USERS_DATA[uid]["consecutive_zero_wins"] = 0
 
                 step_emoji = STEP_EMOJIS.get(offset, "")
-                result_text = f"✅ #{target_raw} ➔ {pred['title']}{step_emoji}"
+                
+                # Формируем текст результата для основного прогноза
+                if main_success:
+                    result_text = f"✅ #{target_raw} ➔ {pred['title']}{step_emoji}"
+                else:
+                    result_text = f"❌ #{target_raw} ➔ {pred['title']} "
+                
+                # Формируем текст результата для зеркального прогноза
+                if mirror_success:
+                    mirror_result_text = f"✅ #{target_raw} ➔ {pred['mirror_title']}{step_emoji}"
+                else:
+                    mirror_result_text = f"❌ #{target_raw} ➔ {pred['mirror_title']} "
 
-                # Редактируем сообщение у пользователя
+                # Редактируем сообщение у пользователя (всегда показываем основной прогноз)
                 try:
                     await context.bot.edit_message_text(chat_id=uid, message_id=pred["msg_id"], text=result_text)
                 except TelegramError:
                     pass
 
-                # Редактируем сообщение в канале (если оно было отправлено)
+                # Редактируем сообщение в основном канале (если оно было отправлено)
                 if pred.get("channel_msg_id") and DOGON_CHANNEL_ID != 0:
                     try:
                         await context.bot.edit_message_text(
@@ -231,7 +265,6 @@ async def handle_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
                 # Редактируем зеркальное сообщение в канале
                 if pred.get("mirror_channel_msg_id") and MIRROR_CHANNEL_ID != 0:
-                    mirror_result_text = f"✅ #{target_raw} ➔ {pred['mirror_title']}{step_emoji}"
                     try:
                         await context.bot.edit_message_text(
                             chat_id=MIRROR_CHANNEL_ID, 
@@ -242,15 +275,18 @@ async def handle_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         pass
 
                 # Если зашло на 3-м или 4-м шаге (offset 2 или 3) - оставляем как было
-                if offset in (2, 3):
+                if offset in (2, 3) and main_success:
                     USERS_DATA[uid]["last_was_dogon"] = True
 
             elif offset == CHECK_RANGE - 1:
+                # Неудача - не зашла ни основная, ни зеркальная масть
                 update_stat(p_type, False)
                 users_to_remove.append(uid)
                 # При неудаче сбрасываем счетчик последовательных успехов
                 USERS_DATA[uid]["consecutive_zero_wins"] = 0
+                
                 result_text = f"❌ #{target_raw} ➔ {pred['title']} "
+                mirror_result_text = f"❌ #{target_raw} ➔ {pred['mirror_title']} "
 
                 # Редактируем сообщение у пользователя
                 try:
@@ -258,7 +294,7 @@ async def handle_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 except TelegramError:
                     pass
 
-                # Редактируем сообщение в канале (если оно было отправлено)
+                # Редактируем сообщение в основном канале (если оно было отправлено)
                 if pred.get("channel_msg_id") and DOGON_CHANNEL_ID != 0:
                     try:
                         await context.bot.edit_message_text(
@@ -271,7 +307,6 @@ async def handle_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
                 # Редактируем зеркальное сообщение в канале
                 if pred.get("mirror_channel_msg_id") and MIRROR_CHANNEL_ID != 0:
-                    mirror_result_text = f"❌ #{target_raw} ➔ {pred['mirror_title']} "
                     try:
                         await context.bot.edit_message_text(
                             chat_id=MIRROR_CHANNEL_ID, 
