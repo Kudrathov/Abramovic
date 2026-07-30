@@ -28,6 +28,9 @@ SUIT_OFFSET = int(os.environ.get("SUIT_OFFSET", 1))
 # ID канала, куда дублировать прогноз, если предыдущий зашел на 3-м или 4-м шаге (offset 2 или 3)
 DOGON_CHANNEL_ID = int(os.environ.get("DOGON_CHANNEL_ID", 0))
 
+# ID канала для зеркальных прогнозов
+MIRROR_CHANNEL_ID = int(os.environ.get("MIRROR_CHANNEL_ID", 0))
+
 OWNER_NAME = "Abramovich"
 OWNER_USERNAME = "@Ol1garxxxx, https://t.me/creativebaccarat"
 
@@ -43,6 +46,14 @@ SUIT_MATRIX = {
     ('♥', '♣'): '♠', ('♥', '♦'): '♦', ('♥', '♥'): '♦', ('♣', '♥'): '♠',
     ('♠', '♥'): '♦', ('♠', '♣'): '♦', ('♠', '♦'): '♥', ('♠', '♠'): '♥',
     ('♦', '♠'): '♠', ('♦', '♣'): '♣', ('♦', '♥'): '♦', ('♦', '♦'): '♥'
+}
+
+# ========================= МАТРИЦА ЗЕРКАЛЬНЫХ МАСТЕЙ =========================
+MIRROR_SUIT_MATRIX = {
+    '♣': '♦',
+    '♦': '♣',
+    '♥': '♠',
+    '♠': '♥'
 }
 
 # ========================= ХРАНИЛИЩЕ В ПАМЯТИ =========================
@@ -134,6 +145,10 @@ def get_first_two_suits(suits_list: List[str]) -> Optional[tuple]:
         return (suits_list[0], suits_list[1])
     return None
 
+def get_mirror_suit(suit: str) -> str:
+    """Возвращает зеркальную масть"""
+    return MIRROR_SUIT_MATRIX.get(suit, suit)
+
 # ========================= КЛАВИАТУРЫ =========================
 def main_menu(current_mode: str = "off"):
     def mark(mode_name):
@@ -214,6 +229,18 @@ async def handle_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     except TelegramError:
                         pass
 
+                # Редактируем зеркальное сообщение в канале
+                if pred.get("mirror_channel_msg_id") and MIRROR_CHANNEL_ID != 0:
+                    mirror_result_text = f"✅ #{target_raw} ➔ {pred['mirror_title']}{step_emoji}"
+                    try:
+                        await context.bot.edit_message_text(
+                            chat_id=MIRROR_CHANNEL_ID, 
+                            message_id=pred["mirror_channel_msg_id"], 
+                            text=mirror_result_text
+                        )
+                    except TelegramError:
+                        pass
+
                 # Если зашло на 3-м или 4-м шаге (offset 2 или 3) - оставляем как было
                 if offset in (2, 3):
                     USERS_DATA[uid]["last_was_dogon"] = True
@@ -238,6 +265,18 @@ async def handle_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             chat_id=DOGON_CHANNEL_ID, 
                             message_id=pred["channel_msg_id"], 
                             text=result_text
+                        )
+                    except TelegramError:
+                        pass
+
+                # Редактируем зеркальное сообщение в канале
+                if pred.get("mirror_channel_msg_id") and MIRROR_CHANNEL_ID != 0:
+                    mirror_result_text = f"❌ #{target_raw} ➔ {pred['mirror_title']} "
+                    try:
+                        await context.bot.edit_message_text(
+                            chat_id=MIRROR_CHANNEL_ID, 
+                            message_id=pred["mirror_channel_msg_id"], 
+                            text=mirror_result_text
                         )
                     except TelegramError:
                         pass
@@ -284,6 +323,13 @@ async def handle_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Формат строго: номер игры и масть
             signal_text = f"⚡️ #{target_raw} ➔ {title}"
             
+            # Зеркальная масть
+            mirror_suit = get_mirror_suit(target_suit)
+            # Определяем зеркальный заголовок (сохраняем ту же роль - Игрок или Банкир)
+            role = "Игрок" if "Игрок" in title else "Банкир"
+            mirror_title = f"{mirror_suit} {role}"
+            mirror_signal_text = f"⚡️ #{target_raw} ➔ {mirror_title}"
+            
             # Проверяем флаг для публикации в канал
             is_dogon_follow_up = user.get("last_was_dogon", False)
             user["last_was_dogon"] = False  # Сразу сбрасываем флаг
@@ -293,22 +339,38 @@ async def handle_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 sent_msg = await context.bot.send_message(uid, signal_text)
                 
                 channel_msg_id = None
-                # 2. Если предыдущий зашел с догоном ИЛИ было 2 успеха подряд в 0, отправляем в канал
-                if is_dogon_follow_up and DOGON_CHANNEL_ID != 0:
-                    channel_msg = await context.bot.send_message(
-                        chat_id=DOGON_CHANNEL_ID, 
-                        text=signal_text
-                    )
-                    channel_msg_id = channel_msg.message_id
-                    logger.info(f"Сигнал отправлен в канал для пользователя {uid} (причина: два успеха подряд в 0 или догон)")
+                mirror_channel_msg_id = None
+                
+                # 2. Если предыдущий зашел с догоном ИЛИ было 2 успеха подряд в 0, отправляем в каналы
+                if is_dogon_follow_up:
+                    # Отправляем в основной канал
+                    if DOGON_CHANNEL_ID != 0:
+                        channel_msg = await context.bot.send_message(
+                            chat_id=DOGON_CHANNEL_ID, 
+                            text=signal_text
+                        )
+                        channel_msg_id = channel_msg.message_id
+                        logger.info(f"Сигнал отправлен в канал для пользователя {uid} (причина: два успеха подряд в 0 или догон)")
+                    
+                    # Отправляем зеркальный прогноз в зеркальный канал
+                    if MIRROR_CHANNEL_ID != 0:
+                        mirror_channel_msg = await context.bot.send_message(
+                            chat_id=MIRROR_CHANNEL_ID, 
+                            text=mirror_signal_text
+                        )
+                        mirror_channel_msg_id = mirror_channel_msg.message_id
+                        logger.info(f"Зеркальный сигнал отправлен в канал для пользователя {uid}")
 
                 ACTIVE_PREDICTIONS[uid] = {
                     "target_raw": target_raw,
                     "mode": mode,
                     "title": title,
                     "target_suit": target_suit,
+                    "mirror_title": mirror_title,
+                    "mirror_suit": mirror_suit,
                     "msg_id": sent_msg.message_id,
-                    "channel_msg_id": channel_msg_id  # Сохраняем ID для последующего редактирования
+                    "channel_msg_id": channel_msg_id,  # ID для основного канала
+                    "mirror_channel_msg_id": mirror_channel_msg_id  # ID для зеркального канала
                 }
 
             except TelegramError as e:
