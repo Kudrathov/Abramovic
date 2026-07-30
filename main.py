@@ -25,10 +25,7 @@ CHECK_RANGE = 4  # 0 (основная), 1, 2, 3 (до 3-го догона вк�
 MAX_GAMES_PER_DAY = 1440
 SUIT_OFFSET = int(os.environ.get("SUIT_OFFSET", 1))
 
-# ID канала, куда дублировать прогноз, если предыдущий зашел на 3-м или 4-м шаге (offset 2 или 3)
 DOGON_CHANNEL_ID = int(os.environ.get("DOGON_CHANNEL_ID", 0))
-
-# ID канала для зеркальных прогнозов
 MIRROR_CHANNEL_ID = int(os.environ.get("MIRROR_CHANNEL_ID", 0))
 
 OWNER_NAME = "Abramovich"
@@ -40,7 +37,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ========================= МАТРИЦА МАСТЕЙ =========================
+# ========================= МАТРИЦЫ МАСТЕЙ =========================
 SUIT_MATRIX = {
     ('♣', '♦'): '♠', ('♣', '♠'): '♣', ('♣', '♣'): '♠', ('♥', '♠'): '♥',
     ('♥', '♣'): '♠', ('♥', '♦'): '♦', ('♥', '♥'): '♦', ('♣', '♥'): '♠',
@@ -48,7 +45,6 @@ SUIT_MATRIX = {
     ('♦', '♠'): '♠', ('♦', '♣'): '♣', ('♦', '♥'): '♦', ('♦', '♦'): '♥'
 }
 
-# ========================= МАТРИЦА ЗЕРКАЛЬНЫХ МАСТЕЙ =========================
 MIRROR_SUIT_MATRIX = {
     '♣': '♦',
     '♦': '♣',
@@ -65,16 +61,22 @@ STATS_DATA: Dict[str, Dict[str, int]] = {
 }
 game_history: List[Dict] = []
 
+STEP_EMOJIS = {
+    0: "0️⃣",
+    1: "1️⃣",
+    2: "2️⃣",
+    3: "3️⃣"
+}
+
 def get_or_create_user(user_id: int) -> dict:
     if user_id not in USERS_DATA:
         USERS_DATA[user_id] = {
             "selected_mode": "off",
             "is_active": True,
             "last_was_dogon": False,
-            "consecutive_zero_wins": 0  # Счетчик последовательных успехов в основной игре
+            "consecutive_zero_wins": 0
         }
     else:
-        # Если поле отсутствует у существующего пользователя, добавляем его
         if "consecutive_zero_wins" not in USERS_DATA[user_id]:
             USERS_DATA[user_id]["consecutive_zero_wins"] = 0
         if "last_was_dogon" not in USERS_DATA[user_id]:
@@ -88,13 +90,6 @@ def update_stat(mode: str, is_success: bool):
         STATS_DATA[mode]["success"] += 1
     else:
         STATS_DATA[mode]["fail"] += 1
-
-STEP_EMOJIS = {
-    0: "0️⃣",  # Основная игра
-    1: "1️⃣",  # 1-й догон
-    2: "2️⃣",  # 2-й догон
-    3: "3️⃣"   # 3-й догон
-}
 
 # ========================= ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ =========================
 def get_target_game_id(current_id: int, offset: int = 0) -> int:
@@ -146,7 +141,6 @@ def get_first_two_suits(suits_list: List[str]) -> Optional[tuple]:
     return None
 
 def get_mirror_suit(suit: str) -> str:
-    """Возвращает зеркальную масть"""
     return MIRROR_SUIT_MATRIX.get(suit, suit)
 
 # ========================= КЛАВИАТУРЫ =========================
@@ -176,7 +170,7 @@ async def handle_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if game_history and game_history[-1]["raw_id"] == raw_id:
         return
 
-    # === 1. ПРОВЕРКА АКТИВНЫХ СИГНАЛОВ И ОБНОВЛЕНИЕ СТАТУСА ===
+    # === 1. ПРОВЕРКА АКТИВНЫХ СИГНАЛОВ (РАЗДЕЛЬНАЯ ЛОГИКА) ===
     users_to_remove = []
 
     for uid, pred in list(ACTIVE_PREDICTIONS.items()):
@@ -185,143 +179,97 @@ async def handle_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if 0 <= offset < CHECK_RANGE:
             p_type = pred["mode"]
-            target_suit = pred.get("target_suit")  # Основная масть для прогноза
-            mirror_suit = pred.get("mirror_suit")  # Зеркальная масть для прогноза
+            target_suit = pred["target_suit"]
+            mirror_suit = pred["mirror_suit"]
             
-            # Проверяем основную масть отдельно
-            main_success = False
-            if p_type == "suit_p":
-                if target_suit in game["player_suits"]:
-                    main_success = True
-            elif p_type == "suit_b":
-                if target_suit in game["banker_suits"]:
-                    main_success = True
-            
-            # Проверяем зеркальную масть отдельно
-            mirror_success = False
-            if p_type == "suit_p":
-                if mirror_suit in game["player_suits"]:
-                    mirror_success = True
-            elif p_type == "suit_b":
-                if mirror_suit in game["banker_suits"]:
-                    mirror_success = True
+            check_suits = game["player_suits"] if p_type == "suit_p" else game["banker_suits"]
 
-            if main_success or mirror_success:
-                # Обновляем статистику для основной масти, если она зашла
-                if main_success:
+            # --- ПРОВЕРКА ОСНОВНОГО ПРОГНОЗА ---
+            if not pred["main_closed"]:
+                if target_suit in check_suits:
+                    pred["main_closed"] = True
+                    pred["main_win_step"] = offset
                     update_stat(p_type, True)
-                
-                # Если основная масть НЕ зашла, но зеркальная зашла - считаем как неудачу для статистики
-                if not main_success and mirror_success:
-                    update_stat(p_type, False)
-                
-                users_to_remove.append(uid)
+                    
+                    # Отслеживание серий успехов
+                    if offset == 0:
+                        USERS_DATA[uid]["consecutive_zero_wins"] = USERS_DATA[uid].get("consecutive_zero_wins", 0) + 1
+                        if USERS_DATA[uid]["consecutive_zero_wins"] >= 2:
+                            USERS_DATA[uid]["last_was_dogon"] = True
+                    else:
+                        USERS_DATA[uid]["consecutive_zero_wins"] = 0
+                        if offset in (2, 3):
+                            USERS_DATA[uid]["last_was_dogon"] = True
 
-                # НОВАЯ ЛОГИКА: отслеживаем успехи в основной игре (offset 0)
-                if offset == 0 and main_success:
-                    # Увеличиваем счетчик последовательных успехов в основной игре
-                    USERS_DATA[uid]["consecutive_zero_wins"] = USERS_DATA[uid].get("consecutive_zero_wins", 0) + 1
-                    # Если было 2 успеха подряд в 0, активируем флаг для публикации следующего сигнала
-                    if USERS_DATA[uid]["consecutive_zero_wins"] >= 2:
-                        USERS_DATA[uid]["last_was_dogon"] = True
-                        logger.info(f"User {uid}: два успеха подряд в 0 - следующий сигнал уйдет в канал")
-                elif offset == 0 and not main_success and mirror_success:
-                    # Если в основной игре зашла только зеркальная масть - сбрасываем счетчик
-                    USERS_DATA[uid]["consecutive_zero_wins"] = 0
-                else:
-                    # Если успех был не в 0, сбрасываем счетчик
-                    USERS_DATA[uid]["consecutive_zero_wins"] = 0
-
-                step_emoji = STEP_EMOJIS.get(offset, "")
-                
-                # Формируем текст результата для основного прогноза
-                if main_success:
+                    # Обновление текста пользователя и основного канала
+                    step_emoji = STEP_EMOJIS.get(offset, "")
                     result_text = f"✅ #{target_raw} ➔ {pred['title']}{step_emoji}"
-                else:
+                    
+                    try:
+                        await context.bot.edit_message_text(chat_id=uid, message_id=pred["msg_id"], text=result_text)
+                    except TelegramError:
+                        pass
+
+                    if pred.get("channel_msg_id") and DOGON_CHANNEL_ID != 0:
+                        try:
+                            await context.bot.edit_message_text(chat_id=DOGON_CHANNEL_ID, message_id=pred["channel_msg_id"], text=result_text)
+                        except TelegramError:
+                            pass
+
+                elif offset == CHECK_RANGE - 1:
+                    # Поражение основного прогноза по истечении 3 догонов
+                    pred["main_closed"] = True
+                    update_stat(p_type, False)
+                    USERS_DATA[uid]["consecutive_zero_wins"] = 0
+                    
                     result_text = f"❌ #{target_raw} ➔ {pred['title']} "
-                
-                # Формируем текст результата для зеркального прогноза
-                if mirror_success:
+                    try:
+                        await context.bot.edit_message_text(chat_id=uid, message_id=pred["msg_id"], text=result_text)
+                    except TelegramError:
+                        pass
+
+                    if pred.get("channel_msg_id") and DOGON_CHANNEL_ID != 0:
+                        try:
+                            await context.bot.edit_message_text(chat_id=DOGON_CHANNEL_ID, message_id=pred["channel_msg_id"], text=result_text)
+                        except TelegramError:
+                            pass
+
+            # --- ПРОВЕРКА ЗЕРКАЛЬНОГО ПРОГНОЗА ---
+            if not pred["mirror_closed"]:
+                if mirror_suit in check_suits:
+                    pred["mirror_closed"] = True
+                    pred["mirror_win_step"] = offset
+
+                    step_emoji = STEP_EMOJIS.get(offset, "")
                     mirror_result_text = f"✅ #{target_raw} ➔ {pred['mirror_title']}{step_emoji}"
-                else:
+
+                    if pred.get("mirror_channel_msg_id") and MIRROR_CHANNEL_ID != 0:
+                        try:
+                            await context.bot.edit_message_text(chat_id=MIRROR_CHANNEL_ID, message_id=pred["mirror_channel_msg_id"], text=mirror_result_text)
+                        except TelegramError:
+                            pass
+
+                elif offset == CHECK_RANGE - 1:
+                    # Поражение зеркального прогноза по истечении 3 догонов
+                    pred["mirror_closed"] = True
                     mirror_result_text = f"❌ #{target_raw} ➔ {pred['mirror_title']} "
 
-                # Редактируем сообщение у пользователя (всегда показываем основной прогноз)
-                try:
-                    await context.bot.edit_message_text(chat_id=uid, message_id=pred["msg_id"], text=result_text)
-                except TelegramError:
-                    pass
+                    if pred.get("mirror_channel_msg_id") and MIRROR_CHANNEL_ID != 0:
+                        try:
+                            await context.bot.edit_message_text(chat_id=MIRROR_CHANNEL_ID, message_id=pred["mirror_channel_msg_id"], text=mirror_result_text)
+                        except TelegramError:
+                            pass
 
-                # Редактируем сообщение в основном канале (если оно было отправлено)
-                if pred.get("channel_msg_id") and DOGON_CHANNEL_ID != 0:
-                    try:
-                        await context.bot.edit_message_text(
-                            chat_id=DOGON_CHANNEL_ID, 
-                            message_id=pred["channel_msg_id"], 
-                            text=result_text
-                        )
-                    except TelegramError:
-                        pass
-
-                # Редактируем зеркальное сообщение в канале
-                if pred.get("mirror_channel_msg_id") and MIRROR_CHANNEL_ID != 0:
-                    try:
-                        await context.bot.edit_message_text(
-                            chat_id=MIRROR_CHANNEL_ID, 
-                            message_id=pred["mirror_channel_msg_id"], 
-                            text=mirror_result_text
-                        )
-                    except TelegramError:
-                        pass
-
-                # Если зашло на 3-м или 4-м шаге (offset 2 или 3) - оставляем как было
-                if offset in (2, 3) and main_success:
-                    USERS_DATA[uid]["last_was_dogon"] = True
-
-            elif offset == CHECK_RANGE - 1:
-                # Неудача - не зашла ни основная, ни зеркальная масть
-                update_stat(p_type, False)
+            # Если ОБА прогноза закончили проверку — удаляем из активных
+            if pred["main_closed"] and pred["mirror_closed"]:
                 users_to_remove.append(uid)
-                # При неудаче сбрасываем счетчик последовательных успехов
-                USERS_DATA[uid]["consecutive_zero_wins"] = 0
-                
-                result_text = f"❌ #{target_raw} ➔ {pred['title']} "
-                mirror_result_text = f"❌ #{target_raw} ➔ {pred['mirror_title']} "
-
-                # Редактируем сообщение у пользователя
-                try:
-                    await context.bot.edit_message_text(chat_id=uid, message_id=pred["msg_id"], text=result_text)
-                except TelegramError:
-                    pass
-
-                # Редактируем сообщение в основном канале (если оно было отправлено)
-                if pred.get("channel_msg_id") and DOGON_CHANNEL_ID != 0:
-                    try:
-                        await context.bot.edit_message_text(
-                            chat_id=DOGON_CHANNEL_ID, 
-                            message_id=pred["channel_msg_id"], 
-                            text=result_text
-                        )
-                    except TelegramError:
-                        pass
-
-                # Редактируем зеркальное сообщение в канале
-                if pred.get("mirror_channel_msg_id") and MIRROR_CHANNEL_ID != 0:
-                    try:
-                        await context.bot.edit_message_text(
-                            chat_id=MIRROR_CHANNEL_ID, 
-                            message_id=pred["mirror_channel_msg_id"], 
-                            text=mirror_result_text
-                        )
-                    except TelegramError:
-                        pass
 
     for uid in users_to_remove:
         ACTIVE_PREDICTIONS.pop(uid, None)
 
     # === 2. ОБНОВЛЕНИЕ ИСТОРИИ ===
     game_history.append(game)
-    if len(game_history) > 15: 
+    if len(game_history) > 15:
         game_history.pop(0)
 
     # === 3. РАСЧЕТ И ВЫДАЧА НОВОГО СИГНАЛА ===
@@ -332,7 +280,7 @@ async def handle_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
     pred_suit_b = SUIT_MATRIX.get(p_first_suits) if p_first_suits else None
 
     active_users = [
-        (uid, udata) for uid, udata in USERS_DATA.items() 
+        (uid, udata) for uid, udata in USERS_DATA.items()
         if udata.get("selected_mode") != "off" and udata.get("is_active", True)
     ]
 
@@ -355,47 +303,34 @@ async def handle_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
             title = f"{pred_suit_b} Банкир"
 
         if signal_matched:
-            # Формат строго: номер игры и масть
             signal_text = f"⚡️ #{target_raw} ➔ {title}"
             
-            # Зеркальная масть
             mirror_suit = get_mirror_suit(target_suit)
-            # Определяем зеркальный заголовок (сохраняем ту же роль - Игрок или Банкир)
             role = "Игрок" if "Игрок" in title else "Банкир"
             mirror_title = f"{mirror_suit} {role}"
             mirror_signal_text = f"⚡️ #{target_raw} ➔ {mirror_title}"
             
-            # Проверяем флаг для публикации в канал
             is_dogon_follow_up = user.get("last_was_dogon", False)
-            user["last_was_dogon"] = False  # Сразу сбрасываем флаг
+            user["last_was_dogon"] = False
 
             try:
-                # 1. Отправляем пользователю
+                # 1. Отправка пользователю
                 sent_msg = await context.bot.send_message(uid, signal_text)
                 
                 channel_msg_id = None
                 mirror_channel_msg_id = None
                 
-                # 2. Если предыдущий зашел с догоном ИЛИ было 2 успеха подряд в 0, отправляем в каналы
+                # 2. Публикация в каналы при выполнении условий
                 if is_dogon_follow_up:
-                    # Отправляем в основной канал
                     if DOGON_CHANNEL_ID != 0:
-                        channel_msg = await context.bot.send_message(
-                            chat_id=DOGON_CHANNEL_ID, 
-                            text=signal_text
-                        )
+                        channel_msg = await context.bot.send_message(chat_id=DOGON_CHANNEL_ID, text=signal_text)
                         channel_msg_id = channel_msg.message_id
-                        logger.info(f"Сигнал отправлен в канал для пользователя {uid} (причина: два успеха подряд в 0 или догон)")
                     
-                    # Отправляем зеркальный прогноз в зеркальный канал
                     if MIRROR_CHANNEL_ID != 0:
-                        mirror_channel_msg = await context.bot.send_message(
-                            chat_id=MIRROR_CHANNEL_ID, 
-                            text=mirror_signal_text
-                        )
+                        mirror_channel_msg = await context.bot.send_message(chat_id=MIRROR_CHANNEL_ID, text=mirror_signal_text)
                         mirror_channel_msg_id = mirror_channel_msg.message_id
-                        logger.info(f"Зеркальный сигнал отправлен в канал для пользователя {uid}")
 
+                # Инициализация структуры раздельной проверки
                 ACTIVE_PREDICTIONS[uid] = {
                     "target_raw": target_raw,
                     "mode": mode,
@@ -404,8 +339,13 @@ async def handle_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "mirror_title": mirror_title,
                     "mirror_suit": mirror_suit,
                     "msg_id": sent_msg.message_id,
-                    "channel_msg_id": channel_msg_id,  # ID для основного канала
-                    "mirror_channel_msg_id": mirror_channel_msg_id  # ID для зеркального канала
+                    "channel_msg_id": channel_msg_id,
+                    "mirror_channel_msg_id": mirror_channel_msg_id,
+                    # Флаги раздельного отслеживания
+                    "main_closed": False,
+                    "mirror_closed": False,
+                    "main_win_step": None,
+                    "mirror_win_step": None
                 }
 
             except TelegramError as e:
@@ -439,7 +379,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         if query.data == "stop_mode":
             user["selected_mode"] = "off"
-            user["consecutive_zero_wins"] = 0  # Сбрасываем счетчик при остановке
+            user["consecutive_zero_wins"] = 0
             user["last_was_dogon"] = False
             await query.edit_message_text("🛑 **Выдача сигналов остановлена.**\nВыберите нужный режим ниже для повторного запуска.", reply_markup=main_menu("off"), parse_mode='Markdown')
 
@@ -447,7 +387,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             mode_map = {"select_suit_p": ("suit_p", "Масть Игрока"), "select_suit_b": ("suit_b", "Масть Банкира")}
             mode_code, mode_title = mode_map[query.data]
             user["selected_mode"] = mode_code
-            user["consecutive_zero_wins"] = 0  # Сбрасываем счетчик при смене режима
+            user["consecutive_zero_wins"] = 0
             user["last_was_dogon"] = False
             text = f"⚡️ **АВТО-РЕЖИМ ЗАПУЩЕН**\n───────────────\n🎯 **Выбран алгоритм:** `{mode_title}`\n📡 Ожидайте сигналы..."
             await query.edit_message_text(text, reply_markup=main_menu(mode_code), parse_mode='Markdown')
