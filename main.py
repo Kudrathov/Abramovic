@@ -182,7 +182,11 @@ async def handle_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
         target_raw = pred["target_raw"]
         offset = (raw_id - target_raw) % MAX_GAMES_PER_DAY
 
-        if 0 <= offset < CHECK_RANGE:
+        # === НОВАЯ ЛОГИКА: Для 💸 прогнозов используем сокращенную проверку (только 0️⃣ и 1️⃣) ===
+        is_special = pred.get("is_special", False)
+        check_range = 2 if is_special else CHECK_RANGE
+
+        if 0 <= offset < check_range:
             p_type = pred["mode"]
             target_suit = pred["target_suit"]
             mirror_suit = pred["mirror_suit"]
@@ -224,7 +228,7 @@ async def handle_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         except TelegramError:
                             pass
 
-                elif offset == CHECK_RANGE - 1:
+                elif offset == check_range - 1:
                     pred["main_closed"] = True
                     update_stat(p_type, False)
                     USERS_DATA[uid]["consecutive_zero_wins"] = 0
@@ -260,7 +264,7 @@ async def handle_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         except TelegramError:
                             pass
 
-                elif offset == CHECK_RANGE - 1:
+                elif offset == check_range - 1:
                     pred["mirror_closed"] = True
                     mirror_result_text = f"❌ #{target_raw} ➔ {pred['mirror_title']} "
 
@@ -377,6 +381,7 @@ async def handle_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "channel_msg_id": channel_msg_id,
                     "mirror_channel_msg_id": mirror_channel_msg_id,
                     "special_channel_msg_id": special_channel_msg_id,
+                    "is_special": is_special_signal,  # <-- НОВЫЙ ФЛАГ для 💸 прогнозов
                     # Флаги раздельного отслеживания
                     "main_closed": False,
                     "mirror_closed": False,
