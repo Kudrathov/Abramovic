@@ -228,6 +228,13 @@ async def handle_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         except TelegramError:
                             pass
 
+                    # === ДОБАВЛЕНО: Редактирование сообщения в специальном канале ===
+                    if pred.get("special_channel_msg_id") and SPECIAL_CHANNEL_ID != 0:
+                        try:
+                            await context.bot.edit_message_text(chat_id=SPECIAL_CHANNEL_ID, message_id=pred["special_channel_msg_id"], text=result_text)
+                        except TelegramError:
+                            pass
+
                 elif offset == check_range - 1:
                     pred["main_closed"] = True
                     update_stat(p_type, False)
@@ -246,6 +253,13 @@ async def handle_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     if pred.get("channel_msg_id") and DOGON_CHANNEL_ID != 0:
                         try:
                             await context.bot.edit_message_text(chat_id=DOGON_CHANNEL_ID, message_id=pred["channel_msg_id"], text=result_text)
+                        except TelegramError:
+                            pass
+
+                    # === ДОБАВЛЕНО: Редактирование сообщения в специальном канале ===
+                    if pred.get("special_channel_msg_id") and SPECIAL_CHANNEL_ID != 0:
+                        try:
+                            await context.bot.edit_message_text(chat_id=SPECIAL_CHANNEL_ID, message_id=pred["special_channel_msg_id"], text=result_text)
                         except TelegramError:
                             pass
 
