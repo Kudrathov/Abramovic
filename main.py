@@ -27,7 +27,7 @@ SUIT_OFFSET = int(os.environ.get("SUIT_OFFSET", 1))
 
 DOGON_CHANNEL_ID = int(os.environ.get("DOGON_CHANNEL_ID", 0))
 MIRROR_CHANNEL_ID = int(os.environ.get("MIRROR_CHANNEL_ID", 0))
-SPECIAL_CHANNEL_ID = int(os.environ.get("SPECIAL_CHANNEL_ID", 0))  # <-- ДОБАВЛЕНО: ID 3-го канала для спец. сигналов
+SPECIAL_CHANNEL_ID = int(os.environ.get("SPECIAL_CHANNEL_ID", 0))  # ID 3-го канала для спец. сигналов
 
 OWNER_NAME = "Abramovich"
 OWNER_USERNAME = "@Ol1garxxxx, https://t.me/creativebaccarat"
@@ -61,7 +61,7 @@ STATS_DATA: Dict[str, Dict[str, int]] = {
     "suit_b": {"success": 0, "fail": 0}
 }
 game_history: List[Dict] = []
-consecutive_non_zero_wins = 0  # <-- ДОБАВЛЕНО: Счетчик подряд идущих побед не на 0 шаге
+consecutive_non_zero_wins = 0  # Глобальный счетчик подряд идущих не-нулевых закрытий (включая ❌)
 
 STEP_EMOJIS = {
     0: "0️⃣",
@@ -160,26 +160,11 @@ def main_menu(current_mode: str = "off"):
 
 # ========================= ЛОГИКА СИГНАЛОВ =========================
 async def handle_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global consecutive_non_zero_wins  # <-- ДОБАВЛЕНО
+    global consecutive_non_zero_wins
     
-    # Для счетчика берем только новые сообщения, чтобы избежать двойного срабатывания при редактировании
-    new_msg = update.channel_post or update.message
-    # Для парсинга игры берем также edited, если вдруг игра обновилась
     msg = update.channel_post or update.edited_channel_post or update.message or update.edited_message
-    
     if not msg or msg.chat.id != SOURCE_CHAT_ID or not msg.text:
         return
-
-    # === 0. ПРОВЕРКА ТРИГГЕРОВ ДЛЯ 3-го КАНАЛА (СЧИТАЕМ ПОДРЯД ИДУЩИЕ НЕ-НУЛЕВЫЕ ПОБЕДЫ) ===
-    if new_msg:
-        text = new_msg.text
-        if "✅" in text and ("Игрок" in text or "Банкир" in text):
-            if "0️⃣" in text:
-                consecutive_non_zero_wins = 0
-            elif "1️⃣" in text or "2️⃣" in text or "3️⃣" in text:
-                consecutive_non_zero_wins += 1
-        elif "❌" in text and ("Игрок" in text or "Банкир" in text):
-            consecutive_non_zero_wins = 0
 
     game = parse_game(msg.text)
     if not game:
@@ -191,6 +176,7 @@ async def handle_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # === 1. ПРОВЕРКА АКТИВНЫХ СИГНАЛОВ (РАЗДЕЛЬНАЯ ЛОГИКА) ===
     users_to_remove = []
+    current_round_outcome = None  # Отслеживает результат текущего раунда для глобального счетчика
 
     for uid, pred in list(ACTIVE_PREDICTIONS.items()):
         target_raw = pred["target_raw"]
@@ -210,6 +196,11 @@ async def handle_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     pred["main_win_step"] = offset
                     update_stat(p_type, True)
                     
+                    # Определяем исход раунда (только один раз за игру)
+                    if current_round_outcome is None:
+                        current_round_outcome = 'zero' if offset == 0 else 'non_zero'
+                    
+                    # Отслеживание серий успехов
                     if offset == 0:
                         USERS_DATA[uid]["consecutive_zero_wins"] = USERS_DATA[uid].get("consecutive_zero_wins", 0) + 1
                         if USERS_DATA[uid]["consecutive_zero_wins"] >= 2:
@@ -237,6 +228,10 @@ async def handle_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     pred["main_closed"] = True
                     update_stat(p_type, False)
                     USERS_DATA[uid]["consecutive_zero_wins"] = 0
+                    
+                    # Проигрыш на последнем шаге тоже считается "не нулевым" исходом для счетчика
+                    if current_round_outcome is None:
+                        current_round_outcome = 'loss'
                     
                     result_text = f"❌ #{target_raw} ➔ {pred['title']} "
                     try:
@@ -281,6 +276,14 @@ async def handle_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for uid in users_to_remove:
         ACTIVE_PREDICTIONS.pop(uid, None)
 
+    # === ОБНОВЛЕНИЕ ГЛОБАЛЬНОГО СЧЕТЧИКА ДЛЯ 3-го КАНАЛА ===
+    # Если non_zero (✅ 1️⃣, 2️⃣, 3️⃣) или loss (❌) -> увеличиваем счетчик
+    if current_round_outcome in ('non_zero', 'loss'):
+        consecutive_non_zero_wins += 1
+    # Если zero (✅ 0️⃣) -> обнуляем счетчик
+    elif current_round_outcome == 'zero':
+        consecutive_non_zero_wins = 0
+
     # === 2. ОБНОВЛЕНИЕ ИСТОРИИ ===
     game_history.append(game)
     if len(game_history) > 15:
@@ -299,7 +302,7 @@ async def handle_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
 
     async def send_signal(user_item):
-        global consecutive_non_zero_wins  # <-- ДОБАВЛЕНО
+        global consecutive_non_zero_wins
         uid, user = user_item
         mode = user["selected_mode"]
 
@@ -318,11 +321,12 @@ async def handle_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
             title = f"{pred_suit_b} Банкир"
 
         if signal_matched:
-            # === НОВАЯ ЛОГИКА ДЛЯ 3-го КАНАЛА ===
+            # === ЛОГИКА ДЛЯ 3-го КАНАЛА ===
             is_special_signal = consecutive_non_zero_wins >= 2
             
+            # Сбрасываем счетчик сразу после активации, чтобы он не сработал повторно
             if is_special_signal:
-                consecutive_non_zero_wins = 0  # Сбрасываем счетчик после активации
+                consecutive_non_zero_wins = 0  
             
             # Формируем текст сигнала
             if is_special_signal:
