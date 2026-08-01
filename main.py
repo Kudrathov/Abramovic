@@ -61,7 +61,7 @@ STATS_DATA: Dict[str, Dict[str, int]] = {
     "suit_b": {"success": 0, "fail": 0}
 }
 game_history: List[Dict] = []
-consecutive_non_zero_wins = 0  # Глобальный счетчик подряд идущих не-нулевых закрытий (включая ❌)
+consecutive_non_zero_wins = 0  # Глобальный счетчик подряд идущих не-нулевых закрытий в КАНАЛЕ
 
 STEP_EMOJIS = {
     0: "0️⃣",
@@ -174,15 +174,13 @@ async def handle_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if game_history and game_history[-1]["raw_id"] == raw_id:
         return
 
-    # === 1. ПРОВЕРКА АКТИВНЫХ СИГНАЛОВ (РАЗДЕЛЬНАЯ ЛОГИКА) ===
+    # === 1. ПРОВЕРКА АКТИВНЫХ СИГНАЛОВ ===
     users_to_remove = []
-    current_round_outcome = None  # Отслеживает результат текущего раунда для глобального счетчика
 
     for uid, pred in list(ACTIVE_PREDICTIONS.items()):
         target_raw = pred["target_raw"]
         offset = (raw_id - target_raw) % MAX_GAMES_PER_DAY
 
-        # === НОВАЯ ЛОГИКА: Для 💸 прогнозов используем сокращенную проверку (только 0️⃣ и 1️⃣) ===
         is_special = pred.get("is_special", False)
         check_range = 2 if is_special else CHECK_RANGE
 
@@ -200,11 +198,14 @@ async def handle_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     pred["main_win_step"] = offset
                     update_stat(p_type, True)
                     
-                    # Определяем исход раунда (только один раз за игру)
-                    if current_round_outcome is None:
-                        current_round_outcome = 'zero' if offset == 0 else 'non_zero'
-                    
-                    # Отслеживание серий успехов
+                    # ОБНОВЛЕНИЕ СЧЕТЧИКА 3-ГО КАНАЛА (Только если сигнал публиковался в канал)
+                    if pred.get("was_published_to_channel", False):
+                        if offset == 0:
+                            consecutive_non_zero_wins = 0
+                        else:
+                            consecutive_non_zero_wins += 1
+
+                    # Отслеживание серий успехов пользователя
                     if offset == 0:
                         USERS_DATA[uid]["consecutive_zero_wins"] = USERS_DATA[uid].get("consecutive_zero_wins", 0) + 1
                         if USERS_DATA[uid]["consecutive_zero_wins"] >= 2:
@@ -228,7 +229,6 @@ async def handle_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         except TelegramError:
                             pass
 
-                    # === ДОБАВЛЕНО: Редактирование сообщения в специальном канале ===
                     if pred.get("special_channel_msg_id") and SPECIAL_CHANNEL_ID != 0:
                         try:
                             await context.bot.edit_message_text(chat_id=SPECIAL_CHANNEL_ID, message_id=pred["special_channel_msg_id"], text=result_text)
@@ -240,9 +240,9 @@ async def handle_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     update_stat(p_type, False)
                     USERS_DATA[uid]["consecutive_zero_wins"] = 0
                     
-                    # Проигрыш на последнем шаге тоже считается "не нулевым" исходом для счетчика
-                    if current_round_outcome is None:
-                        current_round_outcome = 'loss'
+                    # Увеличение счетчика канала при поражении (❌)
+                    if pred.get("was_published_to_channel", False):
+                        consecutive_non_zero_wins += 1
                     
                     result_text = f"❌ #{target_raw} ➔ {pred['title']} "
                     try:
@@ -256,7 +256,6 @@ async def handle_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         except TelegramError:
                             pass
 
-                    # === ДОБАВЛЕНО: Редактирование сообщения в специальном канале ===
                     if pred.get("special_channel_msg_id") and SPECIAL_CHANNEL_ID != 0:
                         try:
                             await context.bot.edit_message_text(chat_id=SPECIAL_CHANNEL_ID, message_id=pred["special_channel_msg_id"], text=result_text)
@@ -293,14 +292,6 @@ async def handle_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     for uid in users_to_remove:
         ACTIVE_PREDICTIONS.pop(uid, None)
-
-    # === ОБНОВЛЕНИЕ ГЛОБАЛЬНОГО СЧЕТЧИКА ДЛЯ 3-го КАНАЛА ===
-    # Если non_zero (✅ 1️⃣, 2️⃣, 3️⃣) или loss (❌) -> увеличиваем счетчик
-    if current_round_outcome in ('non_zero', 'loss'):
-        consecutive_non_zero_wins += 1
-    # Если zero (✅ 0️⃣) -> обнуляем счетчик
-    elif current_round_outcome == 'zero':
-        consecutive_non_zero_wins = 0
 
     # === 2. ОБНОВЛЕНИЕ ИСТОРИИ ===
     game_history.append(game)
@@ -342,7 +333,7 @@ async def handle_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # === ЛОГИКА ДЛЯ 3-го КАНАЛА ===
             is_special_signal = consecutive_non_zero_wins == 3
             
-            # Сбрасываем счетчик сразу после активации, чтобы он не сработал повторно
+            # Сбрасываем счетчик канала сразу после активации
             if is_special_signal:
                 consecutive_non_zero_wins = 0  
             
@@ -367,23 +358,27 @@ async def handle_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 channel_msg_id = None
                 mirror_channel_msg_id = None
                 special_channel_msg_id = None
+                was_published_to_channel = False
                 
                 # 2. Публикация в каналы при выполнении условий
                 if is_dogon_follow_up:
                     if DOGON_CHANNEL_ID != 0:
                         channel_msg = await context.bot.send_message(chat_id=DOGON_CHANNEL_ID, text=signal_text)
                         channel_msg_id = channel_msg.message_id
+                        was_published_to_channel = True
                     
                     if MIRROR_CHANNEL_ID != 0:
                         mirror_channel_msg = await context.bot.send_message(chat_id=MIRROR_CHANNEL_ID, text=mirror_signal_text)
                         mirror_channel_msg_id = mirror_channel_msg.message_id
+                        was_published_to_channel = True
 
                 # 3. Публикация в 3-й (специальный) канал, если сработал триггер
                 if is_special_signal and SPECIAL_CHANNEL_ID != 0:
                     special_msg = await context.bot.send_message(chat_id=SPECIAL_CHANNEL_ID, text=signal_text)
                     special_channel_msg_id = special_msg.message_id
+                    was_published_to_channel = True
 
-                # Инициализация структуры раздельной проверки
+                # Инициализация структуры прогноза
                 ACTIVE_PREDICTIONS[uid] = {
                     "target_raw": target_raw,
                     "mode": mode,
@@ -395,8 +390,8 @@ async def handle_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "channel_msg_id": channel_msg_id,
                     "mirror_channel_msg_id": mirror_channel_msg_id,
                     "special_channel_msg_id": special_channel_msg_id,
-                    "is_special": is_special_signal,  # <-- НОВЫЙ ФЛАГ для 💸 прогнозов
-                    # Флаги раздельного отслеживания
+                    "is_special": is_special_signal,
+                    "was_published_to_channel": was_published_to_channel, # <-- ФЛАГ: БЫЛ ЛИ СИГНАЛ В КАНАЛЕ
                     "main_closed": False,
                     "mirror_closed": False,
                     "main_win_step": None,
