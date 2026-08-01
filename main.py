@@ -184,7 +184,7 @@ async def handle_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # === НОВАЯ ЛОГИКА: Для 💸 прогнозов используем сокращенную проверку (только 0️⃣ и 1️⃣) ===
         is_special = pred.get("is_special", False)
-        check_range = 1 if is_special else CHECK_RANGE
+        check_range = 2 if is_special else CHECK_RANGE
 
         if 0 <= offset < check_range:
             p_type = pred["mode"]
@@ -207,7 +207,7 @@ async def handle_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     # Отслеживание серий успехов
                     if offset == 0:
                         USERS_DATA[uid]["consecutive_zero_wins"] = USERS_DATA[uid].get("consecutive_zero_wins", 0) + 1
-                        if USERS_DATA[uid]["consecutive_zero_wins"] = 3:
+                        if USERS_DATA[uid]["consecutive_zero_wins"] >= 2:
                             USERS_DATA[uid]["last_was_dogon"] = True
                     else:
                         USERS_DATA[uid]["consecutive_zero_wins"] = 0
@@ -340,7 +340,7 @@ async def handle_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if signal_matched:
             # === ЛОГИКА ДЛЯ 3-го КАНАЛА ===
-            is_special_signal = consecutive_non_zero_wins >= 2
+            is_special_signal = consecutive_non_zero_wins == 3
             
             # Сбрасываем счетчик сразу после активации, чтобы он не сработал повторно
             if is_special_signal:
