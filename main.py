@@ -63,6 +63,9 @@ STATS_DATA: Dict[str, Dict[str, int]] = {
 game_history: List[Dict] = []
 consecutive_non_zero_wins = 0  # Глобальный счетчик подряд идущих не-нулевых закрытий в КАНАЛЕ
 
+# === ЗАЩИТА ОТ ДУБЛЕЙ: множество уже обработанных ID игр ===
+PROCESSED_GAME_IDS = set()
+
 STEP_EMOJIS = {
     0: "0️⃣",
     1: "1️⃣",
@@ -171,8 +174,15 @@ async def handle_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     raw_id = game["raw_id"]
-    if game_history and game_history[-1]["raw_id"] == raw_id:
+    
+    # === ЗАЩИТА ОТ ДУБЛЕЙ ===
+    if raw_id in PROCESSED_GAME_IDS:
         return
+    PROCESSED_GAME_IDS.add(raw_id)
+    
+    # Опциональная очистка множества при достижении лимита цикла (защита от утечки памяти при долгой работе)
+    if len(PROCESSED_GAME_IDS) > 2000:
+        PROCESSED_GAME_IDS.clear()
 
     # === 1. ПРОВЕРКА АКТИВНЫХ СИГНАЛОВ ===
     users_to_remove = []
